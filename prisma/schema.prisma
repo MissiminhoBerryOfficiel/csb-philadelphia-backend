@@ -1,0 +1,176 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  SUPER_ADMIN
+  ADMIN
+  TEACHER
+  SECRETARY
+}
+
+enum Trimester {
+  T1
+  T2
+  T3
+}
+
+enum ValidationStatus {
+  DRAFT
+  PENDING_VALIDATION
+  CORRECTION_REQUESTED
+  MODIFICATION_ALLOWED
+  VALIDATED
+  LOCKED
+}
+
+model User {
+  id        String   @id @default(uuid())
+  matricule String   @unique
+  fullName  String
+  email     String   @unique
+  password  String
+  role      Role     @default(TEACHER)
+  phone     String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  teacherSubjects TeacherSubject[]
+  auditLogs       AuditLog[]
+}
+
+model AcademicYear {
+  id        String   @id @default(uuid())
+  name      String   @unique
+  isCurrent Boolean  @default(true)
+  classes   Class[]
+}
+
+model Class {
+  id             String       @id @default(uuid())
+  name           String
+  academicYearId String
+  academicYear   AcademicYear @relation(fields: [academicYearId], references: [id])
+  students       Student[]
+  subjects       Subject[]
+  teacherClasses TeacherSubject[]
+}
+
+model Subject {
+  id             String   @id @default(uuid())
+  name           String
+  code           String
+  classId        String
+  coefficient    Float    @default(1.0)
+  class          Class    @relation(fields: [classId], references: [id])
+  grades         Grade[]
+  teachers       TeacherSubject[]
+}
+
+model TeacherSubject {
+  id        String   @id @default(uuid())
+  userId    String
+  classId   String
+  subjectId String
+
+  teacher   User     @relation(fields: [userId], references: [id])
+  class     Class    @relation(fields: [classId], references: [id])
+  subject   Subject  @relation(fields: [subjectId], references: [id])
+
+  @@unique([userId, classId, subjectId])
+}
+
+model Student {
+  id             String       @id @default(uuid())
+  matricule      String       @unique
+  lastName       String
+  firstName      String
+  birthDate      DateTime
+  gender         String
+  isRepeating    Boolean      @default(false)
+  photoUrl       String?
+  classId        String
+  class          Class        @relation(fields: [classId], references: [id])
+  grades         Grade[]
+  reportCards    ReportCard[]
+  createdAt      DateTime     @default(now())
+}
+
+model Grade {
+  id             String           @id @default(uuid())
+  studentId      String
+  subjectId      String
+  trimester      Trimester
+  interrogation  Float?
+  devoir1        Float?
+  devoir2        Float?
+  calculatedMoy  Float?
+  appreciation   String?
+  status         ValidationStatus @default(DRAFT)
+  
+  student        Student          @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  subject        Subject          @relation(fields: [subjectId], references: [id], onDelete: Cascade)
+
+  @@unique([studentId, subjectId, trimester])
+}
+
+model ReportCard {
+  id             String           @id @default(uuid())
+  studentId      String
+  trimester      Trimester
+  status         ValidationStatus @default(DRAFT)
+  rejectionReason String?
+  
+  totalCoeff     Float            @default(0.0)
+  totalPoints    Float            @default(0.0)
+  trimesterMoy   Float            @default(0.0)
+  rank           Int?
+  
+  highestMoy     Float            @default(0.0)
+  lowestMoy      Float            @default(0.0)
+  classMoy       Float            @default(0.0)
+
+  moyT1          Float?
+  moyT2          Float?
+  moyT3          Float?
+  annualMoy      Float?
+  annualRank     Int?
+
+  distinction    String?
+  discipline     String?
+  headAppreciation String?
+
+  generatedPdfUrl String?
+  validatedAt    DateTime?
+  student        Student          @relation(fields: [studentId], references: [id], onDelete: Cascade)
+
+  @@unique([studentId, trimester])
+}
+
+model AuditLog {
+  id         String   @id @default(uuid())
+  userId     String
+  action     String
+  entity     String
+  entityId   String
+  oldValue   Json?
+  newValue   Json?
+  reason     String?
+  timestamp  DateTime @default(now())
+  user       User     @relation(fields: [userId], references: [id])
+}model SchoolSettings {
+  id           String   @id @default(uuid())
+  country      String   @default("REPUBLIQUE DU BENIN")
+  schoolName   String   @default("COMPLEXE SCOLAIRE BILINGUE PHILADELPHIA")
+  address      String   @default("Sis à Golo-Lohoussa (Abomey-Calavi)")
+  poBox        String   @default("09 BP : 238 Cotonou")
+  phones       String   @default("01 97 95 75 63 / 01 61 31 99 68")
+  email        String   @default("philavin2@gmail.com")
+  logoUrl      String?  @default("/logo-csb.png")
+  updatedAt    DateTime @updatedAt
+}
