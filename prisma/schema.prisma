@@ -12,6 +12,12 @@ enum Role {
   ADMIN
   TEACHER
   SECRETARY
+  ACCOUNTANT
+}
+
+enum SchoolCycle {
+  PRIMAIRE
+  SECONDAIRE
 }
 
 enum Trimester {
@@ -45,132 +51,169 @@ model User {
 }
 
 model AcademicYear {
-  id        String   @id @default(uuid())
-  name      String   @unique
-  isCurrent Boolean  @default(true)
+  id        String           @id @default(uuid())
+  name      String           @unique
+  isCurrent Boolean          @default(true)
   classes   Class[]
+  payments  Payment[]
+  expenses  GeneralExpense[]
 }
 
 model Class {
-  id             String       @id @default(uuid())
+  id             String           @id @default(uuid())
   name           String
+  cycle          SchoolCycle      @default(SECONDAIRE)
+  tuitionFee     Float            @default(0)
+  inscriptionFee Float            @default(0)
   academicYearId String
-  academicYear   AcademicYear @relation(fields: [academicYearId], references: [id])
+  academicYear   AcademicYear     @relation(fields: [academicYearId], references: [id])
   students       Student[]
   subjects       Subject[]
   teacherClasses TeacherSubject[]
 }
 
 model Subject {
-  id             String   @id @default(uuid())
-  name           String
-  code           String
-  classId        String
-  coefficient    Float    @default(1.0)
-  class          Class    @relation(fields: [classId], references: [id])
-  grades         Grade[]
-  teachers       TeacherSubject[]
+  id          String           @id @default(uuid())
+  name        String
+  code        String
+  classId     String
+  coefficient Float            @default(1.0)
+  class       Class            @relation(fields: [classId], references: [id])
+  grades      Grade[]
+  teachers    TeacherSubject[]
 }
 
 model TeacherSubject {
-  id        String   @id @default(uuid())
+  id        String  @id @default(uuid())
   userId    String
   classId   String
   subjectId String
 
-  teacher   User     @relation(fields: [userId], references: [id])
-  class     Class    @relation(fields: [classId], references: [id])
-  subject   Subject  @relation(fields: [subjectId], references: [id])
+  teacher User    @relation(fields: [userId], references: [id])
+  class   Class   @relation(fields: [classId], references: [id])
+  subject Subject @relation(fields: [subjectId], references: [id])
 
   @@unique([userId, classId, subjectId])
 }
 
 model Student {
+  id          String       @id @default(uuid())
+  matricule   String       @unique
+  lastName    String
+  firstName   String
+  birthDate   DateTime
+  gender      String
+  isRepeating Boolean      @default(false)
+  photoUrl    String?
+  classId     String
+  class       Class        @relation(fields: [classId], references: [id])
+  grades      Grade[]
+  reportCards ReportCard[]
+  payments    Payment[]
+  createdAt   DateTime     @default(now())
+}
+
+model Payment {
   id             String       @id @default(uuid())
-  matricule      String       @unique
-  lastName       String
-  firstName      String
-  birthDate      DateTime
-  gender         String
-  isRepeating    Boolean      @default(false)
-  photoUrl       String?
-  classId        String
-  class          Class        @relation(fields: [classId], references: [id])
-  grades         Grade[]
-  reportCards    ReportCard[]
-  createdAt      DateTime     @default(now())
+  receiptNumber  String       @unique
+  studentId      String
+  academicYearId String
+  amount         Float
+  paymentType    String       @default("SCOLARITE")
+  paymentMethod  String       @default("ESPECES")
+  note           String?
+  paidAt         DateTime     @default(now())
+
+  student      Student      @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  academicYear AcademicYear @relation(fields: [academicYearId], references: [id])
+}
+
+model GeneralExpense {
+  id             String       @id @default(uuid())
+  label          String
+  category       String       @default("FONCTIONNEMENT")
+  amount         Float
+  paymentMethod  String       @default("ESPECES")
+  beneficiary    String?
+  reference      String?
+  expenseDate    DateTime     @default(now())
+  academicYearId String
+
+  academicYear AcademicYear @relation(fields: [academicYearId], references: [id])
 }
 
 model Grade {
-  id             String           @id @default(uuid())
-  studentId      String
-  subjectId      String
-  trimester      Trimester
-  interrogation  Float?
-  devoir1        Float?
-  devoir2        Float?
-  calculatedMoy  Float?
-  appreciation   String?
-  status         ValidationStatus @default(DRAFT)
-  
-  student        Student          @relation(fields: [studentId], references: [id], onDelete: Cascade)
-  subject        Subject          @relation(fields: [subjectId], references: [id], onDelete: Cascade)
+  id            String           @id @default(uuid())
+  studentId     String
+  subjectId     String
+  trimester     Trimester
+  interrogation Float?
+  devoir1       Float?
+  devoir2       Float?
+  calculatedMoy Float?
+  appreciation  String?
+  status        ValidationStatus @default(DRAFT)
+
+  student Student @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  subject Subject @relation(fields: [subjectId], references: [id], onDelete: Cascade)
 
   @@unique([studentId, subjectId, trimester])
 }
 
 model ReportCard {
-  id             String           @id @default(uuid())
-  studentId      String
-  trimester      Trimester
-  status         ValidationStatus @default(DRAFT)
+  id              String           @id @default(uuid())
+  studentId       String
+  trimester       Trimester
+  status          ValidationStatus @default(DRAFT)
   rejectionReason String?
-  
-  totalCoeff     Float            @default(0.0)
-  totalPoints    Float            @default(0.0)
-  trimesterMoy   Float            @default(0.0)
-  rank           Int?
-  
-  highestMoy     Float            @default(0.0)
-  lowestMoy      Float            @default(0.0)
-  classMoy       Float            @default(0.0)
 
-  moyT1          Float?
-  moyT2          Float?
-  moyT3          Float?
-  annualMoy      Float?
-  annualRank     Int?
+  totalCoeff   Float @default(0.0)
+  totalPoints  Float @default(0.0)
+  trimesterMoy Float @default(0.0)
+  rank         Int?
 
-  distinction    String?
-  discipline     String?
+  highestMoy Float @default(0.0)
+  lowestMoy  Float @default(0.0)
+  classMoy   Float @default(0.0)
+
+  moyT1      Float?
+  moyT2      Float?
+  moyT3      Float?
+  annualMoy  Float?
+  annualRank Int?
+
+  distinction      String?
+  discipline       String?
   headAppreciation String?
 
   generatedPdfUrl String?
-  validatedAt    DateTime?
-  student        Student          @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  validatedAt     DateTime?
+  student         Student   @relation(fields: [studentId], references: [id], onDelete: Cascade)
 
   @@unique([studentId, trimester])
 }
 
 model AuditLog {
+  id        String   @id @default(uuid())
+  userId    String
+  action    String
+  entity    String
+  entityId  String
+  oldValue  Json?
+  newValue  Json?
+  reason    String?
+  timestamp DateTime @default(now())
+  user      User     @relation(fields: [userId], references: [id])
+}
+
+model SchoolSettings {
   id         String   @id @default(uuid())
-  userId     String
-  action     String
-  entity     String
-  entityId   String
-  oldValue   Json?
-  newValue   Json?
-  reason     String?
-  timestamp  DateTime @default(now())
-  user       User     @relation(fields: [userId], references: [id])
-}model SchoolSettings {
-  id           String   @id @default(uuid())
-  country      String   @default("REPUBLIQUE DU BENIN")
-  schoolName   String   @default("COMPLEXE SCOLAIRE BILINGUE PHILADELPHIA")
-  address      String   @default("Sis à Golo-Lohoussa (Abomey-Calavi)")
-  poBox        String   @default("09 BP : 238 Cotonou")
-  phones       String   @default("01 97 95 75 63 / 01 61 31 99 68")
-  email        String   @default("philavin2@gmail.com")
-  logoUrl      String?  @default("/logo-csb.png")
-  updatedAt    DateTime @updatedAt
+  country    String   @default("REPUBLIQUE DU BENIN")
+  schoolName String   @default("COMPLEXE SCOLAIRE BILINGUE PHILADELPHIA")
+  address    String   @default("Sis à Golo-Lohoussa (Abomey-Calavi)")
+  poBox      String   @default("09 BP : 238 Cotonou")
+  phones     String   @default("01 97 95 75 63 / 01 61 31 99 68")
+  email      String   @default("philawin2@gmail.com")
+  logoUrl    String?  @default("/logo-csb.png")
+  updatedAt  DateTime @updatedAt
 }
