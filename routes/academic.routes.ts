@@ -1,347 +1,219 @@
-import { Router, Request, Response, NextFunction } from 'express';
-import { PrismaClient, Trimester, ValidationStatus } from '@prisma/client';
-import jwt from 'jsonwebtoken';
-import bcrypt from 'bcryptjs';
+generator client {
+  provider = "prisma-client-js"
+}
 
-const router = Router();
-const prisma = new PrismaClient();
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
 
-const verifyAuth = (req: Request, res: Response, next: NextFunction) => {
-  const authHeader = req.headers.authorization;
-  const token = authHeader && authHeader.split(' ')[1];
-  if (!token) return res.status(401).json({ message: 'Accès non autorisé.' });
+enum Role {
+  SUPER_ADMIN
+  ADMIN
+  TEACHER
+  SECRETARY
+  ACCOUNTANT
+}
 
-  try {
-    const decoded = jwt.verify(token, process.env.JWT_SECRET || 'csb_philadelphia_secret_2026');
-    (req as any).user = decoded;
-    next();
-  } catch {
-    return res.status(403).json({ message: 'Session expirée, veuillez vous reconnecter.' });
-  }
-};
+enum SchoolCycle {
+  PRIMAIRE
+  SECONDAIRE
+}
 
-// 1. Récupérer toutes les classes et leurs élèves (2026-2027)
-router.get('/classes', verifyAuth, async (_req: Request, res: Response) => {
-  try {
-    let year = await prisma.academicYear.findFirst({ where: { isCurrent: true } });
-    if (!year) {
-      year = await prisma.academicYear.create({
-        data: { name: '2026-2027', isCurrent: true },
-      });
-    }
+enum Trimester {
+  T1
+  T2
+  T3
+}
 
-    const classes = await prisma.class.findMany({
-      where: { academicYearId: year.id },
-      include: {
-        students: { orderBy: { lastName: 'asc' } },
-        subjects: { orderBy: { name: 'asc' } },
-      },
-      orderBy: { name: 'asc' },
-    });
-    res.json(classes);
-  } catch (error) {
-    res.status(500).json({ message: 'Erreur lors du chargement des classes.', error });
-  }
-});
+enum ValidationStatus {
+  DRAFT
+  PENDING_VALIDATION
+  CORRECTION_REQUESTED
+  MODIFICATION_ALLOWED
+  VALIDATED
+  LOCKED
+}
 
-// 2. Créer une nouvelle classe avec les 14 disciplines officielles
-router.post('/classes', verifyAuth, async (req: Request, res: Response) => {
-  try {
-    const { name } = req.body;
-    let year = await prisma.academicYear.findFirst({ where: { isCurrent: true } });
-    if (!year) {
-      year = await prisma.academicYear.create({
-        data: { name: '2026-2027', isCurrent: true },
-      });
-    }
+model User {
+  id        String   @id @default(uuid())
+  matricule String   @unique
+  fullName  String
+  email     String   @unique
+  password  String
+  role      Role     @default(TEACHER)
+  phone     String?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
-    const newClass = await prisma.class.create({
-      data: { name, academicYearId: year.id },
-    });
+  teacherSubjects TeacherSubject[]
+  auditLogs       AuditLog[]
+}
 
-    const disciplines = [
-      { name: 'Lecture/Ort.Gr', code: 'LECT_ORT', coefficient: 2 },
-      { name: 'Com. Ecrite Comp. FR', code: 'COM_FR', coefficient: 2 },
-      { name: 'Hist-Géo', code: 'HIST_GEO', coefficient: 2 },
-      { name: 'LV1 /Anglais', code: 'LV1_ANG', coefficient: 2 },
-      { name: 'LV2 / Esp', code: 'LV2_ESP', coefficient: 2 },
-      { name: 'Mathématique', code: 'MATH', coefficient: 3 },
-      { name: 'Biologie / SVT', code: 'SVT', coefficient: 2 },
-      { name: 'Philosophie', code: 'PHILO', coefficient: 2 },
-      { name: 'Physique Chimie / PCT', code: 'PCT', coefficient: 2 },
-      { name: 'Informatique', code: 'INFO', coefficient: 1 },
-      { name: 'Allemand', code: 'ALL', coefficient: 2 },
-      { name: 'Economie', code: 'ECO', coefficient: 2 },
-      { name: 'EPS', code: 'EPS', coefficient: 1 },
-      { name: 'Conduite', code: 'COND', coefficient: 1 },
-    ];
+model AcademicYear {
+  id        String           @id @default(uuid())
+  name      String           @unique
+  isCurrent Boolean          @default(true)
+  classes   Class[]
+  payments  Payment[]
+  expenses  GeneralExpense[]
+}
 
-    for (const d of disciplines) {
-      await prisma.subject.create({
-        data: {
-          name: d.name,
-          code: d.code,
-          coefficient: d.coefficient,
-          classId: newClass.id,
-        },
-      });
-    }
+model Class {
+  id             String           @id @default(uuid())
+  name           String
+  cycle          SchoolCycle      @default(SECONDAIRE)
+  tuitionFee     Float            @default(0)
+  inscriptionFee Float            @default(0)
+  academicYearId String
+  academicYear   AcademicYear     @relation(fields: [academicYearId], references: [id])
+  students       Student[]
+  subjects       Subject[]
+  teacherClasses TeacherSubject[]
+}
 
-    res.status(201).json(newClass);
-  } catch (error) {
-    res.status(500).json({ message: 'Erreur lors de la création de la classe.', error });
-  }
-});
+model Subject {
+  id          String           @id @default(uuid())
+  name        String
+  code        String
+  classId     String
+  coefficient Float            @default(1.0)
+  class       Class            @relation(fields: [classId], references: [id])
+  grades      Grade[]
+  teachers    TeacherSubject[]
+}
 
-// 3. Inscrire un nouvel élève dans une classe
-router.post('/students', verifyAuth, async (req: Request, res: Response) => {
-  try {
-    const user = (req as any).user;
-    if (user.role === 'TEACHER') {
-      return res.status(403).json({ message: 'Accès refusé aux enseignants.' });
-    }
+model TeacherSubject {
+  id        String  @id @default(uuid())
+  userId    String
+  classId   String
+  subjectId String
 
-    const { matricule, lastName, firstName, birthDate, gender, isRepeating, classId } = req.body;
+  teacher User    @relation(fields: [userId], references: [id])
+  class   Class   @relation(fields: [classId], references: [id])
+  subject Subject @relation(fields: [subjectId], references: [id])
 
-    const student = await prisma.student.create({
-      data: {
-        matricule,
-        lastName: lastName.toUpperCase(),
-        firstName,
-        birthDate: new Date(birthDate),
-        gender,
-        isRepeating: Boolean(isRepeating),
-        classId,
-      },
-    });
+  @@unique([userId, classId, subjectId])
+}
 
-    res.status(201).json(student);
-  } catch (error: any) {
-    if (error.code === 'P2002') {
-      return res.status(400).json({ message: 'Ce numéro matricule existe déjà.' });
-    }
-    res.status(500).json({ message: "Erreur lors de l'inscription de l'élève.", error });
-  }
-});
+model Student {
+  id          String       @id @default(uuid())
+  matricule   String       @unique
+  lastName    String
+  firstName   String
+  birthDate   DateTime
+  gender      String
+  isRepeating Boolean      @default(false)
+  photoUrl    String?
+  classId     String
+  class       Class        @relation(fields: [classId], references: [id])
+  grades      Grade[]
+  reportCards ReportCard[]
+  payments    Payment[]
+  createdAt   DateTime     @default(now())
+}
 
-// 4. Modifier les informations d'un élève
-router.put('/students/:id', verifyAuth, async (req: Request, res: Response) => {
-  try {
-    const user = (req as any).user;
-    if (user.role === 'TEACHER') {
-      return res.status(403).json({ message: 'Accès refusé aux enseignants.' });
-    }
-    const { id } = req.params;
-    const { matricule, lastName, firstName, birthDate, gender, isRepeating } = req.body;
+model Payment {
+  id             String       @id @default(uuid())
+  receiptNumber  String       @unique
+  studentId      String
+  academicYearId String
+  amount         Float
+  paymentType    String       @default("SCOLARITE")
+  paymentMethod  String       @default("ESPECES")
+  note           String?
+  paidAt         DateTime     @default(now())
 
-    const updated = await prisma.student.update({
-      where: { id },
-      data: {
-        matricule,
-        lastName: lastName.toUpperCase(),
-        firstName,
-        birthDate: new Date(birthDate),
-        gender,
-        isRepeating: Boolean(isRepeating),
-      },
-    });
-    res.json(updated);
-  } catch (error) {
-    res.status(500).json({ message: "Erreur lors de la modification de l'élève.", error });
-  }
-});
+  student      Student      @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  academicYear AcademicYear @relation(fields: [academicYearId], references: [id])
+}
 
-// 5. Supprimer un élève
-router.delete('/students/:id', verifyAuth, async (req: Request, res: Response) => {
-  try {
-    const user = (req as any).user;
-    if (user.role !== 'SUPER_ADMIN' && user.role !== 'ADMIN') {
-      return res.status(403).json({ message: 'Seul le Fondateur ou le Directeur peut supprimer un élève.' });
-    }
-    const { id } = req.params;
-    await prisma.grade.deleteMany({ where: { studentId: id } });
-    await prisma.reportCard.deleteMany({ where: { studentId: id } });
-    await prisma.student.delete({ where: { id } });
+model GeneralExpense {
+  id             String       @id @default(uuid())
+  label          String
+  category       String       @default("FONCTIONNEMENT")
+  amount         Float
+  paymentMethod  String       @default("ESPECES")
+  beneficiary    String?
+  reference      String?
+  expenseDate    DateTime     @default(now())
+  academicYearId String
 
-    res.json({ message: 'Élève supprimé avec succès.' });
-  } catch (error) {
-    res.status(500).json({ message: "Erreur lors de la suppression de l'élève.", error });
-  }
-});
+  academicYear AcademicYear @relation(fields: [academicYearId], references: [id])
+}
 
-// 6. Charger les notes d'un élève pour un trimestre
-router.get('/grades/:studentId/:trimester', verifyAuth, async (req: Request, res: Response) => {
-  try {
-    const { studentId, trimester } = req.params;
-    const grades = await prisma.grade.findMany({
-      where: { studentId, trimester: trimester as Trimester },
-      include: { subject: true },
-    });
-    res.json(grades);
-  } catch (error) {
-    res.status(500).json({ message: 'Erreur lors du chargement des notes.', error });
-  }
-});
+model Grade {
+  id            String           @id @default(uuid())
+  studentId     String
+  subjectId     String
+  trimester     Trimester
+  interrogation Float?
+  devoir1       Float?
+  devoir2       Float?
+  calculatedMoy Float?
+  appreciation  String?
+  status        ValidationStatus @default(DRAFT)
 
-// 7. Enregistrer & Verrouiller les notes
-router.post('/grades/save', verifyAuth, async (req: Request, res: Response) => {
-  try {
-    const user = (req as any).user;
-    const { studentId, subjectId, trimester, interrogation, devoir1, devoir2, appreciation, lockAfterSave } = req.body;
+  student Student @relation(fields: [studentId], references: [id], onDelete: Cascade)
+  subject Subject @relation(fields: [subjectId], references: [id], onDelete: Cascade)
 
-    const existing = await prisma.grade.findUnique({
-      where: {
-        studentId_subjectId_trimester: {
-          studentId,
-          subjectId,
-          trimester: trimester as Trimester,
-        },
-      },
-    });
+  @@unique([studentId, subjectId, trimester])
+}
 
-    if (
-      existing &&
-      (existing.status === ValidationStatus.VALIDATED ||
-        existing.status === ValidationStatus.LOCKED ||
-        existing.status === ValidationStatus.PENDING_VALIDATION) &&
-      user.role === 'TEACHER'
-    ) {
-      return res.status(403).json({
-        message: 'Note verrouillée ! Seul le Fondateur ou le Directeur peut corriger cette note.',
-      });
-    }
+model ReportCard {
+  id              String           @id @default(uuid())
+  studentId       String
+  trimester       Trimester
+  status          ValidationStatus @default(DRAFT)
+  rejectionReason String?
 
-    const moyDev = (Number(devoir1) + Number(devoir2)) / 2;
-    const calculatedMoy = Number(((Number(interrogation) + 2 * moyDev) / 3).toFixed(2));
-    const nextStatus = lockAfterSave ? ValidationStatus.LOCKED : ValidationStatus.DRAFT;
+  totalCoeff   Float @default(0.0)
+  totalPoints  Float @default(0.0)
+  trimesterMoy Float @default(0.0)
+  rank         Int?
 
-    const saved = await prisma.grade.upsert({
-      where: {
-        studentId_subjectId_trimester: {
-          studentId,
-          subjectId,
-          trimester: trimester as Trimester,
-        },
-      },
-      update: {
-        interrogation: Number(interrogation),
-        devoir1: Number(devoir1),
-        devoir2: Number(devoir2),
-        calculatedMoy,
-        appreciation,
-        status: nextStatus,
-      },
-      create: {
-        studentId,
-        subjectId,
-        trimester: trimester as Trimester,
-        interrogation: Number(interrogation),
-        devoir1: Number(devoir1),
-        devoir2: Number(devoir2),
-        calculatedMoy,
-        appreciation,
-        status: nextStatus,
-      },
-    });
+  highestMoy Float @default(0.0)
+  lowestMoy  Float @default(0.0)
+  classMoy   Float @default(0.0)
 
-    res.json(saved);
-  } catch (error) {
-    res.status(500).json({ message: 'Erreur lors de la sauvegarde de la note.', error });
-  }
-});
+  moyT1      Float?
+  moyT2      Float?
+  moyT3      Float?
+  annualMoy  Float?
+  annualRank Int?
 
-// 8. Déverrouiller une note (Exclusif Super Admin / Directeur)
-router.post('/grades/unlock/:gradeId', verifyAuth, async (req: Request, res: Response) => {
-  try {
-    const user = (req as any).user;
-    if (user.role !== 'SUPER_ADMIN' && user.role !== 'ADMIN') {
-      return res.status(403).json({ message: 'Action réservée au Fondateur ou au Directeur.' });
-    }
+  distinction      String?
+  discipline       String?
+  headAppreciation String?
 
-    const { gradeId } = req.params;
-    const unlocked = await prisma.grade.update({
-      where: { id: gradeId },
-      data: { status: ValidationStatus.MODIFICATION_ALLOWED },
-    });
+  generatedPdfUrl String?
+  validatedAt     DateTime?
+  student         Student   @relation(fields: [studentId], references: [id], onDelete: Cascade)
 
-    res.json(unlocked);
-  } catch (error) {
-    res.status(500).json({ message: 'Erreur lors du déverrouillage.', error });
-  }
-});
+  @@unique([studentId, trimester])
+}
 
-// 9. Lister tous les membres du personnel (Enseignants, Secrétariat, Direction)
-router.get('/staff', verifyAuth, async (req: Request, res: Response) => {
-  try {
-    const user = (req as any).user;
-    if (user.role !== 'SUPER_ADMIN' && user.role !== 'ADMIN') {
-      return res.status(403).json({ message: 'Accès réservé à la Direction.' });
-    }
-    const staff = await prisma.user.findMany({
-      select: { id: true, matricule: true, fullName: true, email: true, role: true, phone: true },
-      orderBy: { createdAt: 'asc' },
-    });
-    res.json(staff);
-  } catch (error) {
-    res.status(500).json({ message: 'Erreur lors du chargement du personnel.', error });
-  }
-});
+model AuditLog {
+  id        String   @id @default(uuid())
+  userId    String
+  action    String
+  entity    String
+  entityId  String
+  oldValue  Json?
+  newValue  Json?
+  reason    String?
+  timestamp DateTime @default(now())
+  user      User     @relation(fields: [userId], references: [id])
+}
 
-// 10. Créer un nouveau compte Enseignant ou Secrétaire
-router.post('/staff', verifyAuth, async (req: Request, res: Response) => {
-  try {
-    const user = (req as any).user;
-    if (user.role !== 'SUPER_ADMIN' && user.role !== 'ADMIN') {
-      return res.status(403).json({ message: 'Action réservée au Fondateur ou au Directeur.' });
-    }
-
-    const { fullName, email, password, role, phone } = req.body;
-    const hashedPassword = await bcrypt.hash(password, 10);
-    const count = await prisma.user.count();
-
-    const newStaff = await prisma.user.create({
-      data: {
-        matricule: `CSB-PERS-00${count + 1}`,
-        fullName,
-        email: email.toLowerCase().trim(),
-        password: hashedPassword,
-        role: role || 'TEACHER',
-        phone: phone || '',
-      },
-    });
-
-    res.status(201).json({
-      id: newStaff.id,
-      matricule: newStaff.matricule,
-      fullName: newStaff.fullName,
-      email: newStaff.email,
-      role: newStaff.role,
-    });
-  } catch (error: any) {
-    if (error.code === 'P2002') {
-      return res.status(400).json({ message: 'Cet email est déjà utilisé.' });
-    }
-    res.status(500).json({ message: 'Erreur lors de la création du compte.', error });
-  }
-});
-
-// 11. Supprimer un compte Enseignant/Secrétaire
-router.delete('/staff/:id', verifyAuth, async (req: Request, res: Response) => {
-  try {
-    const user = (req as any).user;
-    if (user.role !== 'SUPER_ADMIN') {
-      return res.status(403).json({ message: 'Seul le Fondateur peut supprimer un compte.' });
-    }
-    const { id } = req.params;
-    if (id === user.id) {
-      return res.status(400).json({ message: 'Vous ne pouvez pas supprimer votre propre compte.' });
-    }
-    await prisma.teacherSubject.deleteMany({ where: { userId: id } });
-    await prisma.user.delete({ where: { id } });
-    res.json({ message: 'Compte supprimé.' });
-  } catch (error) {
-    res.status(500).json({ message: 'Erreur lors de la suppression.', error });
-  }
-});
-
-export default router;
+model SchoolSettings {
+  id         String   @id @default(uuid())
+  country    String   @default("REPUBLIQUE DU BENIN")
+  schoolName String   @default("COMPLEXE SCOLAIRE BILINGUE PHILADELPHIA")
+  address    String   @default("Sis à Golo-Lohoussa (Abomey-Calavi)")
+  poBox      String   @default("09 BP : 238 Cotonou")
+  phones     String   @default("01 97 95 75 63 / 01 61 31 99 68")
+  email      String   @default("philawin2@gmail.com")
+  logoUrl    String?  @default("/logo-csb.png")
+  updatedAt  DateTime @updatedAt
+}
