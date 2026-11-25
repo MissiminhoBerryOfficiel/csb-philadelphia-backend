@@ -6,6 +6,7 @@ import gradeRoutes from './routes/grade.routes';
 import reportCardRoutes from './routes/reportCard.routes';
 import studentRoutes from './routes/student.routes';
 import academicRoutes from './routes/academic.routes';
+import accountingRoutes from './routes/accounting.routes';
 
 dotenv.config();
 
@@ -20,6 +21,7 @@ app.use('/api/grades', gradeRoutes);
 app.use('/api/report-cards', reportCardRoutes);
 app.use('/api/students', studentRoutes);
 app.use('/api/academic', academicRoutes);
+app.use('/api/accounting', accountingRoutes);
 
 app.get('/api/health', (req, res) => {
   res.json({ status: 'OK', establishment: 'CSB PHILADELPHIA', timestamp: new Date() });
