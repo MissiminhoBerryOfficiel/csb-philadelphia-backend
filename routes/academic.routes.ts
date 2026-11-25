@@ -20,22 +20,9 @@ const verifyAuth = (req: Request, res: Response, next: NextFunction) => {
   }
 };
 
-// Ordre officiel exact du bulletin CSB Philadelphia
 const OFFICIAL_SUBJECT_ORDER = [
-  'LECT_ORT',
-  'COM_FR',
-  'HIST_GEO',
-  'LV1_ANG',
-  'LV2_ESP',
-  'MATH',
-  'SVT',
-  'PHILO',
-  'PCT',
-  'INFO',
-  'ALL',
-  'ECO',
-  'EPS',
-  'COND',
+  'LECT_ORT', 'COM_FR', 'HIST_GEO', 'LV1_ANG', 'LV2_ESP', 'MATH',
+  'SVT', 'PHILO', 'PCT', 'INFO', 'ALL', 'ECO', 'EPS', 'COND',
 ];
 
 const sortSubjectsOfficial = <T extends { code: string; name: string }>(subjects: T[]): T[] => {
@@ -60,9 +47,10 @@ const getOrCreateYear = async (yearName?: string) => {
   return year;
 };
 
-// 1. Récupérer toutes les classes et leurs élèves pour l'année sélectionnée
+// 1. Récupérer les classes (filtrées automatiquement si c'est un TEACHER ayant des attributions)
 router.get('/classes', verifyAuth, async (req: Request, res: Response) => {
   try {
+    const user = (req as any).user;
     const yearName = req.query.year as string | undefined;
     const year = await getOrCreateYear(yearName);
 
@@ -75,6 +63,27 @@ router.get('/classes', verifyAuth, async (req: Request, res: Response) => {
       orderBy: [{ cycle: 'asc' }, { name: 'asc' }],
     });
 
+    // Si c'est un enseignant, vérifier ses attributions de classes & matières
+    if (user.role === 'TEACHER') {
+      const assignments = await prisma.teacherSubject.findMany({
+        where: { userId: user.id },
+      });
+
+      if (assignments.length > 0) {
+        const allowedSubjectIds = new Set(assignments.map((a) => a.subjectId));
+        const filteredClasses = classes
+          .map((cls) => ({
+            ...cls,
+            subjects: sortSubjectsOfficial(
+              cls.subjects.filter((s) => allowedSubjectIds.has(s.id))
+            ),
+          }))
+          .filter((cls) => cls.subjects.length > 0);
+
+        return res.json(filteredClasses);
+      }
+    }
+
     const formatted = classes.map((cls) => ({
       ...cls,
       subjects: sortSubjectsOfficial(cls.subjects),
@@ -86,7 +95,7 @@ router.get('/classes', verifyAuth, async (req: Request, res: Response) => {
   }
 });
 
-// 2. Créer une nouvelle classe avec les coefficients initialisés à 0
+// 2. Créer une nouvelle classe avec coefficients à 0
 router.post('/classes', verifyAuth, async (req: Request, res: Response) => {
   try {
     const { name, cycle, tuitionFee, inscriptionFee, yearName } = req.body;
@@ -151,7 +160,54 @@ router.post('/classes', verifyAuth, async (req: Request, res: Response) => {
   }
 });
 
-// 3. Inscrire un nouvel élève dans une classe
+// 2b. Supprimer une classe dont on n'a plus besoin (Fondateur / Directeur)
+router.delete('/classes/:id', verifyAuth, async (req: Request, res: Response) => {
+  try {
+    const user = (req as any).user;
+    if (user.role !== 'SUPER_ADMIN' && user.role !== 'ADMIN') {
+      return res.status(403).json({ message: 'Seul le Fondateur ou le Directeur peut supprimer une classe.' });
+    }
+    const { id } = req.params;
+
+    const students = await prisma.student.findMany({ where: { classId: id }, select: { id: true } });
+    const studentIds = students.map((s) => s.id);
+    const subjects = await prisma.subject.findMany({ where: { classId: id }, select: { id: true } });
+    const subjectIds = subjects.map((s) => s.id);
+
+    if (studentIds.length > 0) {
+      await prisma.payment.deleteMany({ where: { studentId: { in: studentIds } } });
+      await prisma.grade.deleteMany({ where: { studentId: { in: studentIds } } });
+      await prisma.reportCard.deleteMany({ where: { studentId: { in: studentIds } } });
+      await prisma.student.deleteMany({ where: { classId: id } });
+    }
+    if (subjectIds.length > 0) {
+      await prisma.teacherSubject.deleteMany({ where: { subjectId: { in: subjectIds } } });
+      await prisma.grade.deleteMany({ where: { subjectId: { in: subjectIds } } });
+      await prisma.subject.deleteMany({ where: { classId: id } });
+    }
+
+    await prisma.class.delete({ where: { id } });
+    res.json({ message: 'Classe supprimée avec succès.' });
+  } catch (error) {
+    res.status(500).json({ message: 'Erreur lors de la suppression de la classe.', error });
+  }
+});
+
+// 2c. Remettre tous les coefficients d'une classe à 0
+router.post('/classes/:id/reset-coefs', verifyAuth, async (req: Request, res: Response) => {
+  try {
+    const { id } = req.params;
+    await prisma.subject.updateMany({
+      where: { classId: id },
+      data: { coefficient: 0 },
+    });
+    res.json({ message: 'Tous les coefficients de la classe ont été remis à 0.' });
+  } catch (error) {
+    res.status(500).json({ message: 'Erreur lors de la réinitialisation des coefficients.', error });
+  }
+});
+
+// 3. Inscrire un nouvel élève
 router.post('/students', verifyAuth, async (req: Request, res: Response) => {
   try {
     const user = (req as any).user;
@@ -247,23 +303,24 @@ router.post('/grades/save', verifyAuth, async (req: Request, res: Response) => {
   try {
     const user = (req as any).user;
     const {
-      studentId,
-      subjectId,
-      trimester,
-      coefficient,
-      interrogation,
-      devoir1,
-      devoir2,
-      appreciation,
-      lockAfterSave,
+      studentId, subjectId, trimester, coefficient,
+      interrogation, devoir1, devoir2, appreciation, lockAfterSave,
     } = req.body;
+
+    // Vérifier que l'enseignant est bien autorisé sur cette matière si des attributions existent
+    if (user.role === 'TEACHER') {
+      const assignments = await prisma.teacherSubject.findMany({ where: { userId: user.id } });
+      if (assignments.length > 0 && !assignments.some((a) => a.subjectId === subjectId)) {
+        return res.status(403).json({
+          message: "Vous n'êtes pas attribué à cette matière/classe.",
+        });
+      }
+    }
 
     const existing = await prisma.grade.findUnique({
       where: {
         studentId_subjectId_trimester: {
-          studentId,
-          subjectId,
-          trimester: trimester as Trimester,
+          studentId, subjectId, trimester: trimester as Trimester,
         },
       },
     });
@@ -294,9 +351,7 @@ router.post('/grades/save', verifyAuth, async (req: Request, res: Response) => {
     const saved = await prisma.grade.upsert({
       where: {
         studentId_subjectId_trimester: {
-          studentId,
-          subjectId,
-          trimester: trimester as Trimester,
+          studentId, subjectId, trimester: trimester as Trimester,
         },
       },
       update: {
@@ -346,7 +401,7 @@ router.post('/grades/unlock/:gradeId', verifyAuth, async (req: Request, res: Res
   }
 });
 
-// 9. Lister tous les membres du personnel
+// 9. Lister tous les membres du personnel avec leurs matières/classes attribuées
 router.get('/staff', verifyAuth, async (req: Request, res: Response) => {
   try {
     const user = (req as any).user;
@@ -354,7 +409,26 @@ router.get('/staff', verifyAuth, async (req: Request, res: Response) => {
       return res.status(403).json({ message: 'Accès réservé à la Direction.' });
     }
     const staff = await prisma.user.findMany({
-      select: { id: true, matricule: true, fullName: true, email: true, role: true, phone: true },
+      select: {
+        id: true,
+        matricule: true,
+        fullName: true,
+        email: true,
+        role: true,
+        phone: true,
+        subjectsTaught: {
+          select: {
+            subjectId: true,
+            subject: {
+              select: {
+                id: true,
+                name: true,
+                class: { select: { id: true, name: true } },
+              },
+            },
+          },
+        },
+      },
       orderBy: { createdAt: 'asc' },
     });
     res.json(staff);
@@ -363,7 +437,7 @@ router.get('/staff', verifyAuth, async (req: Request, res: Response) => {
   }
 });
 
-// 10. Créer un nouveau compte
+// 10. Créer un nouveau compte personnel
 router.post('/staff', verifyAuth, async (req: Request, res: Response) => {
   try {
     const user = (req as any).user;
@@ -372,6 +446,15 @@ router.post('/staff', verifyAuth, async (req: Request, res: Response) => {
     }
 
     const { fullName, email, password, role, phone } = req.body;
+    const cleanEmail = email.toLowerCase().trim();
+
+    const existingUser = await prisma.user.findUnique({ where: { email: cleanEmail } });
+    if (existingUser) {
+      return res.status(400).json({
+        message: `L'email "${cleanEmail}" appartient déjà à ${existingUser.fullName}. Cliquez sur le crayon à droite de son nom pour le modifier.`,
+      });
+    }
+
     const hashedPassword = await bcrypt.hash(password, 10);
     const count = await prisma.user.count();
 
@@ -379,7 +462,7 @@ router.post('/staff', verifyAuth, async (req: Request, res: Response) => {
       data: {
         matricule: `CSB-PERS-00${count + 1}`,
         fullName,
-        email: email.toLowerCase().trim(),
+        email: cleanEmail,
         password: hashedPassword,
         role: role || 'TEACHER',
         phone: phone || '',
@@ -392,16 +475,79 @@ router.post('/staff', verifyAuth, async (req: Request, res: Response) => {
       fullName: newStaff.fullName,
       email: newStaff.email,
       role: newStaff.role,
+      phone: newStaff.phone,
     });
-  } catch (error: any) {
-    if (error.code === 'P2002') {
-      return res.status(400).json({ message: 'Cet email est déjà utilisé.' });
-    }
+  } catch (error) {
     res.status(500).json({ message: 'Erreur lors de la création du compte.', error });
   }
 });
 
-// 11. Supprimer un compte
+// 10b. Modifier les coordonnées, le rôle ou le mot de passe d'un membre du personnel
+router.put('/staff/:id', verifyAuth, async (req: Request, res: Response) => {
+  try {
+    const user = (req as any).user;
+    if (user.role !== 'SUPER_ADMIN' && user.role !== 'ADMIN') {
+      return res.status(403).json({ message: 'Action réservée au Fondateur ou au Directeur.' });
+    }
+
+    const { id } = req.params;
+    const { fullName, email, password, role, phone } = req.body;
+
+    const updateData: any = {
+      fullName,
+      email: email.toLowerCase().trim(),
+      role,
+      phone: phone || '',
+    };
+
+    if (password && password.trim().length > 0) {
+      updateData.password = await bcrypt.hash(password.trim(), 10);
+    }
+
+    const updated = await prisma.user.update({
+      where: { id },
+      data: updateData,
+      select: { id: true, matricule: true, fullName: true, email: true, role: true, phone: true },
+    });
+
+    res.json(updated);
+  } catch (error: any) {
+    if (error.code === 'P2002') {
+      return res.status(400).json({ message: 'Cet email est déjà utilisé par un autre compte.' });
+    }
+    res.status(500).json({ message: 'Erreur lors de la mise à jour du compte.', error });
+  }
+});
+
+// 10c. Attribuer les classes et matières d'un professeur (1, 2 ou 3 classes)
+router.post('/staff/:id/assignments', verifyAuth, async (req: Request, res: Response) => {
+  try {
+    const user = (req as any).user;
+    if (user.role !== 'SUPER_ADMIN' && user.role !== 'ADMIN') {
+      return res.status(403).json({ message: 'Action réservée à la Direction.' });
+    }
+    const { id } = req.params;
+    const { subjectIds } = req.body; // string[]
+
+    await prisma.teacherSubject.deleteMany({ where: { userId: id } });
+
+    if (Array.isArray(subjectIds) && subjectIds.length > 0) {
+      await prisma.teacherSubject.createMany({
+        data: subjectIds.map((subjectId: string) => ({
+          userId: id,
+          subjectId,
+        })),
+        skipDuplicates: true,
+      });
+    }
+
+    res.json({ message: 'Classes et matières attribuées avec succès !' });
+  } catch (error) {
+    res.status(500).json({ message: "Erreur lors de l'attribution des classes.", error });
+  }
+});
+
+// 11. Supprimer un compte personnel
 router.delete('/staff/:id', verifyAuth, async (req: Request, res: Response) => {
   try {
     const user = (req as any).user;
