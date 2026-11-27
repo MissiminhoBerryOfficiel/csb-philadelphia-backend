@@ -64,26 +64,22 @@ router.get('/classes', verifyAuth, async (req: Request, res: Response) => {
     });
 
     if (user.role === 'TEACHER') {
-      try {
-        const assignments = await prisma.teacherSubject.findMany({
-          where: { userId: user.id },
-        });
+      const assignments = await prisma.teacherSubject.findMany({
+        where: { userId: user.id },
+      });
 
-        if (assignments.length > 0) {
-          const allowedSubjectIds = new Set(assignments.map((a) => a.subjectId));
-          const filteredClasses = classes
-            .map((cls) => ({
-              ...cls,
-              subjects: sortSubjectsOfficial(
-                cls.subjects.filter((s) => allowedSubjectIds.has(s.id))
-              ),
-            }))
-            .filter((cls) => cls.subjects.length > 0);
+      if (assignments.length > 0) {
+        const allowedSubjectIds = new Set(assignments.map((a) => a.subjectId));
+        const filteredClasses = classes
+          .map((cls) => ({
+            ...cls,
+            subjects: sortSubjectsOfficial(
+              cls.subjects.filter((s) => allowedSubjectIds.has(s.id))
+            ),
+          }))
+          .filter((cls) => cls.subjects.length > 0);
 
-          return res.json(filteredClasses);
-        }
-      } catch {
-        // Ignore si TeacherSubject pas encore migré
+        return res.json(filteredClasses);
       }
     }
 
@@ -403,14 +399,15 @@ router.post('/grades/unlock/:gradeId', verifyAuth, async (req: Request, res: Res
   }
 });
 
-// 9. Lister tous les membres du personnel
+// 9. Lister tous les membres du personnel avec leurs matières attribuées
 router.get('/staff', verifyAuth, async (req: Request, res: Response) => {
   try {
     const user = (req as any).user;
     if (user.role !== 'SUPER_ADMIN' && user.role !== 'ADMIN') {
       return res.status(403).json({ message: 'Accès réservé à la Direction.' });
     }
-    const staff = await prisma.user.findMany({
+
+    const users = await prisma.user.findMany({
       select: {
         id: true,
         matricule: true,
@@ -418,28 +415,35 @@ router.get('/staff', verifyAuth, async (req: Request, res: Response) => {
         email: true,
         role: true,
         phone: true,
-        subjectsTaught: {
-          select: {
-            subjectId: true,
-            subject: {
-              select: {
-                id: true,
-                name: true,
-                class: { select: { id: true, name: true } },
-              },
-            },
-          },
-        },
       },
       orderBy: { createdAt: 'asc' },
     });
-    res.json(staff);
-  } catch {
-    const fallbackStaff = await prisma.user.findMany({
-      select: { id: true, matricule: true, fullName: true, email: true, role: true, phone: true },
-      orderBy: { createdAt: 'asc' },
+
+    const assignments = await prisma.teacherSubject.findMany({
+      include: {
+        subject: {
+          select: {
+            id: true,
+            name: true,
+            class: { select: { id: true, name: true } },
+          },
+        },
+      },
     });
-    res.json(fallbackStaff);
+
+    const formatted = users.map((u) => ({
+      ...u,
+      subjectsTaught: assignments
+        .filter((a) => a.userId === u.id)
+        .map((a) => ({
+          subjectId: a.subjectId,
+          subject: a.subject,
+        })),
+    }));
+
+    res.json(formatted);
+  } catch (error) {
+    res.status(500).json({ message: 'Erreur lors du chargement du personnel.', error });
   }
 });
 
@@ -527,7 +531,7 @@ router.put('/staff/:id', verifyAuth, async (req: Request, res: Response) => {
   }
 });
 
-// 10c. Attribuer les classes et matières d'un professeur
+// 10c. Attribuer les classes et matières d'un professeur (avec classId requis)
 router.post('/staff/:id/assignments', verifyAuth, async (req: Request, res: Response) => {
   try {
     const user = (req as any).user;
@@ -540,13 +544,21 @@ router.post('/staff/:id/assignments', verifyAuth, async (req: Request, res: Resp
     await prisma.teacherSubject.deleteMany({ where: { userId: id } });
 
     if (Array.isArray(subjectIds) && subjectIds.length > 0) {
-      await prisma.teacherSubject.createMany({
-        data: subjectIds.map((subjectId: string) => ({
-          userId: id,
-          subjectId,
-        })),
-        skipDuplicates: true,
+      const subjects = await prisma.subject.findMany({
+        where: { id: { in: subjectIds } },
+        select: { id: true, classId: true },
       });
+
+      if (subjects.length > 0) {
+        await prisma.teacherSubject.createMany({
+          data: subjects.map((s) => ({
+            userId: id,
+            subjectId: s.id,
+            classId: s.classId,
+          })),
+          skipDuplicates: true,
+        });
+      }
     }
 
     res.json({ message: 'Classes et matières attribuées avec succès !' });
